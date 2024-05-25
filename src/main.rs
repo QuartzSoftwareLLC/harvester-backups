@@ -22,6 +22,7 @@ fn get_job_string(job: &RecurringJobTask) -> String {
 }
 
 /// A command line tool to for managing harvester volumes
+/// Please set the SOURCE_CONTEXT and TARGET_CONTEXT to choose clusters
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -68,7 +69,6 @@ impl From<&'static str> for Context {
     }
 }
 
-
 /// Used to create clients from the config file using the name of the context
 impl Context {
     async fn new(config: &str) -> Context {
@@ -92,7 +92,9 @@ impl Context {
 
 /// Helper function to get the harvester client from context
 async fn get_harvester_client() -> Client {
-    Context::new("harvester").await.client
+    let env_harvester = "TARGET_CONTEXT";
+    let context = std::env::var(env_harvester).unwrap_or("harvester".to_string()); // or .expect("Unable to get HARVESTER_CONTEXT");
+    Context::new(context.as_str()).await.client
 }
 
 /// Creates the recurring job in harvester for backups or snapshots
@@ -178,24 +180,31 @@ async fn get_linked_pvcs() -> Vec<LinkedPVC> {
     let volumes: Api<Volume> = Api::namespaced(get_harvester_client().await, "longhorn-system");
 
     let volumes = volumes.list(&ListParams::default()).await.unwrap().items;
-    Context::new("production")
-        .await
-        .get_pvcs()
-        .await
+    let env_source = std::env::var("SOURCE_CONTEXT").unwrap_or("production".to_string());
+    let env_target = std::env::var("TARGET_CONTEXT").unwrap_or("harvester".to_string());
+
+    let source_pvcs = Context::new(env_source.as_str()).await.get_pvcs().await;
+
+    source_pvcs
         .into_iter()
         .map(|source| {
-            let volume = target_pvcs
-                .iter()
-                .find(|target| {
-                    target.name_any() == source.clone().spec.unwrap().volume_name.unwrap()
-                })
-                .unwrap()
-                .to_owned()
-                .spec
-                .clone()
-                .unwrap()
-                .volume_name
-                .unwrap();
+            let volume;
+            if env_source != env_target {
+                volume = target_pvcs
+                    .iter()
+                    .find(|target| {
+                        target.name_any() == source.clone().spec.unwrap().volume_name.unwrap()
+                    })
+                    .expect("No matching target volume was found for the source pvc")
+                    .to_owned()
+                    .spec
+                    .clone()
+                    .unwrap()
+                    .volume_name
+                    .unwrap();
+            } else {
+                volume = source.spec.clone().unwrap().volume_name.unwrap();
+            }
 
             let jobs = volumes
                 .iter()
@@ -289,10 +298,4 @@ async fn main() {
             call_job(pvc, retention.unwrap_or(4), RecurringJobTask::Snapshot).await;
         }
     }
-}
-
-#[cfg(test)]
-mod tests {
-
-
 }
