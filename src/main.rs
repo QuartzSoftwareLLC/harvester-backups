@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use clap::{Parser, Subcommand};
 use colored::*;
-use k8s_crds_longhorn::{RecurringJob, RecurringJobSpec, RecurringJobTask, Snapshot, Volume};
-use k8s_openapi::api::core::v1::{Namespace, PersistentVolumeClaim, Pod};
+use k8s_crds_longhorn::{RecurringJob, RecurringJobSpec, RecurringJobTask, Volume};
+use k8s_openapi::api::core::v1::PersistentVolumeClaim;
 use kube::Config;
 use serde_json::json;
 
@@ -42,19 +42,22 @@ enum Command {
 
     /// Add a backup task for a given pvc
     Backup {
+        /// The pvc to update
         pvc: String,
+        /// How man backups to keep
         retention: Option<i64>,
     },
 
     /// Add a snapshot task for a given pvc
     Snapshot {
+        /// The pvc to update
         pvc: String,
+        /// The number of  snapshots to keep
         retention: Option<i64>,
     },
 }
 
 struct Context {
-    config: Config,
     client: Client,
 }
 
@@ -65,6 +68,8 @@ impl From<&'static str> for Context {
     }
 }
 
+
+/// Used to create clients from the config file using the name of the context
 impl Context {
     async fn new(config: &str) -> Context {
         let config = kube::Config::from_kubeconfig(&KubeConfigOptions {
@@ -75,7 +80,6 @@ impl Context {
         .unwrap(); // or .expect("Unable to load kubeconfig"    }
 
         Context {
-            config: config.clone(),
             client: Client::try_from(config).unwrap(),
         } // or .expect("Unable to create client")
     }
@@ -86,10 +90,12 @@ impl Context {
     }
 }
 
+/// Helper function to get the harvester client from context
 async fn get_harvester_client() -> Client {
     Context::new("harvester").await.client
 }
 
+/// Creates the recurring job in harvester for backups or snapshots
 async fn create_recurring_job(
     name: &str,
     cron: &str,
@@ -121,6 +127,7 @@ async fn create_recurring_job(
     job_name.to_string()
 }
 
+/// Helper function for the client to create the recurring job and then label the volume with the job name.
 async fn call_job(pvc: String, retain: i64, task: RecurringJobTask) {
     let name = create_recurring_job(&pvc, "0 0 * * *", task, retain).await;
     label_pvc(&pvc, &name).await;
@@ -128,6 +135,7 @@ async fn call_job(pvc: String, retain: i64, task: RecurringJobTask) {
     println!("Created a recurring job")
 }
 
+/// Adds a label to the corresponding volume for your pvc so that it can be  used by the recurring job.
 async fn label_pvc(pvc: &str, job: &str) {
     // patch the volume to add the recurring job
     let volumes: Api<k8s_crds_longhorn::Volume> =
@@ -164,6 +172,7 @@ async fn label_pvc(pvc: &str, job: &str) {
         .unwrap();
 }
 
+/// Associates the pvcs on the source cluster with the volumes on the target cluster and returns them
 async fn get_linked_pvcs() -> Vec<LinkedPVC> {
     let target_pvcs = Context::new("harvester").await.get_pvcs().await;
     let volumes: Api<Volume> = Api::namespaced(get_harvester_client().await, "longhorn-system");
@@ -208,6 +217,7 @@ async fn get_linked_pvcs() -> Vec<LinkedPVC> {
         .collect()
 }
 
+/// Gets the volume associated with the get linked_pvcs. Used to grab volumes when labeling
 async fn get_volume(pvc: &str) -> String {
     get_linked_pvcs()
         .await
@@ -217,6 +227,7 @@ async fn get_volume(pvc: &str) -> String {
         .volume
 }
 
+/// Helper function for clap to print all recurring jobs and their info
 async fn print_recurring_jobs() {
     println!("Retrieving Jobs:");
     let recurring_jobs: Api<RecurringJob> = Api::all(get_harvester_client().await);
@@ -240,6 +251,7 @@ async fn print_recurring_jobs() {
         })
 }
 
+/// Helper function for clap to print all pvcs and their info
 async fn print_pvcs() {
     get_linked_pvcs().await.into_iter().for_each(|f| {
         println!(
@@ -251,6 +263,7 @@ async fn print_pvcs() {
     })
 }
 
+/// Structure to hold relationship between pvc on the source cluster and the volume and jobs on the harvester cluster
 #[derive(Debug)]
 struct LinkedPVC {
     pvc: String,
@@ -281,70 +294,5 @@ async fn main() {
 #[cfg(test)]
 mod tests {
 
-    use std::collections::BTreeMap;
 
-    use k8s_crds_longhorn::{RecurringJobSpec, RecurringJobTask};
-    use k8s_openapi::api::core::v1::{PersistentVolume, PersistentVolumeClaim, Volume};
-    use kube::{
-        api::{ObjectMeta, PartialObjectMetaExt},
-        core::gvk::ParseGroupVersionError,
-    };
-
-    use super::*;
-
-    #[tokio::test]
-    async fn get_ns() {
-        let client = Client::try_default().await.unwrap();
-        let ns: Api<Pod> = Api::namespaced(client, "default");
-        let pods = ns.list(&ListParams::default()).await.unwrap();
-        for p in pods.items {
-            println!("{:#?}", p);
-        }
-    }
-
-    #[tokio::test]
-    async fn read_config() {
-        let client = Context::new("harvester").await.client;
-        let volumes: Api<PersistentVolumeClaim> = Api::default_namespaced(client);
-        let vols = volumes
-            .list(&ListParams::default())
-            .await
-            .unwrap()
-            .into_iter()
-            .filter(|x| {
-                x.annotations()
-                    .get("harvesterhci.io/owned-by")
-                    .unwrap_or(&"".to_string())
-                    .contains("production-pool")
-            })
-            .collect_vec();
-        for v in vols {
-            println!("{:#?}", v);
-        }
-    }
-    #[tokio::test]
-    async fn get_pv() {
-        let links = get_linked_pvcs().await;
-
-        dbg!(links);
-    }
-
-    #[tokio::test]
-    async fn test_list_recurring_jobs() {
-        print_recurring_jobs().await
-    }
-
-    #[tokio::test]
-    async fn create_snapshot() {
-        let client = Context::new("harvester").await.client;
-        let snapshot: Api<Snapshot> = Api::namespaced(client, "longhorn-system");
-        let mut new_snap = Snapshot::default();
-        new_snap.metadata.name = Some("test-snap".to_string());
-        new_snap.spec.volume = "pvc-25500808-894c-4503-82f5-dd13175a8e75".to_string();
-
-        snapshot
-            .create(&PostParams::default(), &new_snap)
-            .await
-            .unwrap();
-    }
 }
