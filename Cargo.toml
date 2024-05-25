@@ -1,0 +1,17 @@
+[package]
+name = "harvester-backups"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.86"
+clap = { version = "4.5.4", features = ["derive"] }
+colored = "2.1.0"
+itertools = "0.13.0"
+k8s-crds-longhorn = "0.4.1"
+k8s-openapi = { version = "0.22.0", features = ["v1_27"] }
+kube = { version = "0.91.0", features = ["config"] }
+serde = "1.0.202"
+serde_json = "1.0.117"
+serde_yml = "0.0.7"
+tokio = { version = "1.37.0", features = ["full"] }
